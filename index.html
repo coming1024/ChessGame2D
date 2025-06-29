@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Pixi Tactics Prototype</title>
+    <div style="position:fixed;bottom:10px;left:10px;z-index:999;color:white">
+        <div>Your Peer ID: <span id="peer-id">Loading...</span></div>
+        <input id="peer-connect" placeholder="Other Peer ID" />
+        <button onclick="connectToPeer()">Connect</button>
+        <div id="conn-status">Not connected</div>
+    </div>
+    <style>
+        body {
+            margin: 0;
+            background: #000;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+
+<body>
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@7/dist/pixi.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    </script>
+    <script>
+        const app = new PIXI.Application({
+            width: window.innerWidth,
+            height: window.innerHeight,
+            backgroundColor: 0x222222,
+            resolution: window.devicePixelRatio || 1,
+            autoDensity: true,
+        });
+        document.body.appendChild(app.view);
+
+        let currentTurn = 'P1';
+
+        // create banner
+        const bannerContainer = new PIXI.Container();
+        bannerContainer.zIndex = 9999; // 保证显示在最上层
+        app.stage.addChild(bannerContainer);
+        app.stage.sortableChildren = true;
+
+        // 背景横幅
+        const bannerBg = new PIXI.Graphics();
+        bannerBg.beginFill(0x000000, 0.8); // 黑底半透明
+        bannerBg.drawRoundedRect(0, 0, 400, 80, 20);
+        bannerBg.endFill();
+        bannerContainer.addChild(bannerBg);
+
+        // 文字
+        const bannerText = new PIXI.Text('YOUR TURN', {
+            fontSize: 36,
+            fill: 0xffffff,
+            fontWeight: 'bold',
+            align: 'center'
+        });
+        bannerText.anchor.set(0.5);
+        bannerText.x = 200;
+        bannerText.y = 40;
+        bannerContainer.addChild(bannerText);
+
+        // 设置居中显示
+        bannerContainer.x = (app.screen.width - 400) / 2;
+        bannerContainer.y = app.screen.height / 2 - 40;
+        bannerContainer.alpha = 0; // 初始不可见
+
+        //define map
+        const tileSize = 64;
+        const mapSize = 8;
+        const mapSymbols = [
+            ['.', '.', '.', '.', '.', '.', '.', '.'],
+            ['.', 'F', 'T', 'M', 'M', 'T', 'F', '.'],
+            ['.', '.', 'F', '.', '.', 'F', '.', '.'],
+            ['.', 'M', '.', '.', '.', '.', 'M', '.'],
+            ['.', 'M', '.', '.', '.', '.', 'M', '.'],
+            ['.', '.', 'F', '.', '.', 'F', '.', '.'],
+            ['.', 'F', 'T', 'M', 'M', 'T', 'F', '.'],
+            ['.', '.', '.', '.', '.', '.', '.', '.'],
+        ];
+
+        //import assets
+        const units = []; // Array of unit sprites with metadata
+        const baseTileUrl = './assets/base.png';
+        const unitTextures = {
+            infantry: './assets/soldier001.png',
+            commander: './assets/commander001.png',
+            cavalry: './assets/cavalry001.png',
+            archer: './assets/archer001.png',
+        };
+        const overlayTexturesMap = {
+            'F': './assets/treePines.png',
+            'T': './assets/towerTall.png',
+            'M': './assets/rocks.png',
+        };
+
+        const mapContainer = new PIXI.Container();
+        app.stage.addChild(mapContainer);
+
+        const toLoad = [baseTileUrl, ...Object.values(unitTextures), ...Object.values(overlayTexturesMap)];
+
+        //game logic
+        PIXI.Assets.load(toLoad).then(resources => {
+            const baseTexture = resources[baseTileUrl];
+            for (let y = 0; y < 2; y++) {
+                for (let x = 0; x < 2; x++) {
+                    const sprite = new PIXI.Sprite(baseTexture);
+                    sprite.width = tileSize * 4;
+                    sprite.height = tileSize * 4;
+                    sprite.x = x * tileSize * 4;
+                    sprite.y = y * tileSize * 4;
+                    mapContainer.addChild(sprite);
+                }
+            }
+
+            for (let row = 0; row < mapSize; row++) {
+                for (let col = 0; col < mapSize; col++) {
+                    const sym = mapSymbols[row][col];
+                    if (sym === '.' || !overlayTexturesMap[sym]) continue;
+
+                    const texture = resources[overlayTexturesMap[sym]];
+                    const sprite = new PIXI.Sprite(texture);
+                    sprite.width = tileSize;
+                    sprite.height = tileSize;
+                    sprite.x = col * tileSize;
+                    sprite.y = row * tileSize;
+                    mapContainer.addChild(sprite);
+                }
+            }
+
+            // Add player-controlled units for demo
+            addUnit('infantry', 0, 2, resources);
+            addUnit('commander', 0, 3, resources);
+            addUnit('cavalry', 0, 4, resources);
+            addUnit('archer', 0, 5, resources);
+
+            // Add Player 2 units on row 7
+            addUnit('infantry', 7, 2, resources, 'P2');
+            addUnit('commander', 7, 3, resources, 'P2');
+            addUnit('cavalry', 7, 4, resources, 'P2');
+            addUnit('archer', 7, 5, resources, 'P2');
+
+            centerMap();
+        });
+
+        function addUnit(type, row, col, resources, owner = 'P1') {
+            const texture = resources[unitTextures[type]];
+            const sprite = new PIXI.Sprite(texture);
+            sprite.width = tileSize;
+            sprite.height = tileSize;
+            sprite.x = col * tileSize;
+            sprite.y = row * tileSize;
+            sprite.interactive = true;
+            sprite.buttonMode = true;
+
+            //给红蓝方附上颜色
+            const colorMatrix = new PIXI.filters.ColorMatrixFilter();
+            if (owner === 'P1') {
+                colorMatrix.tint(0x3366ff); // 蓝色
+            } else if (owner === 'P2') {
+                colorMatrix.tint(0xff3333); // 红色
+            }
+            sprite.filters = [colorMatrix];
+
+            const unit = { sprite, row, col, type, owner };
+            units.push(unit);
+            mapContainer.addChild(sprite);
+
+            sprite.on('pointerdown', () => {
+                if (unit.owner !== myPlayerId || currentTurn !== myPlayerId) return; // 只允许控制自己的单位
+
+                if (selectedUnit === unit) {
+                    clearHighlights();
+                    selectedUnit = null;
+                } else {
+                    clearHighlights();
+                    selectedUnit = unit;
+                    showMoves(unit);
+                }
+            });
+        }
+
+        function showMoves(unit) {
+            clearHighlights();
+            const directions = getMovePattern(unit);
+            directions.forEach(({ dr, dc }) => {
+                const nr = unit.row + dr, nc = unit.col + dc;
+                if (nr < 0 || nr >= mapSize || nc < 0 || nc >= mapSize) return;
+                if (mapSymbols[nr][nc] === 'M' && unit.type === 'cavalry') return; // Cannot enter mountain
+
+                const tile = new PIXI.Graphics();
+                tile.beginFill(0xffff00, 0.4);
+                tile.drawRect(0, 0, tileSize, tileSize);
+                tile.endFill();
+                tile.x = nc * tileSize;
+                tile.y = nr * tileSize;
+                tile.interactive = true;
+                tile.buttonMode = true;
+
+                tile.on('pointerdown', () => {
+                    // 查找是否有敌方单位在目标位置
+                    const targetEnemy = units.find(
+                        u => u.row === nr && u.col === nc && u.owner !== unit.owner
+                    );
+
+                    // 如果有敌方单位，移除敌方单位
+                    if (targetEnemy) {
+                        mapContainer.removeChild(targetEnemy.sprite); // 从场景移除
+                        const index = units.indexOf(targetEnemy);     // 从数组移除
+                        if (index !== -1) units.splice(index, 1);
+                        checkGameOver();
+                    }
+
+                    // move unit
+                    unit.row = nr;
+                    unit.col = nc;
+                    unit.sprite.x = nc * tileSize;
+                    unit.sprite.y = nr * tileSize;
+
+                    // 检查当前位置地形，决定透明度
+                    const terrain = mapSymbols[nr][nc];
+                    if (terrain === 'F' || terrain === 'T' || terrain === 'M') {
+                        unit.sprite.alpha = 0.5; // 半透明
+                    } else {
+                        unit.sprite.alpha = 1; // 正常不透明
+                    }
+
+                    clearHighlights();
+
+                    selectedUnit = null; // 移动后取消选中
+
+                    currentTurn = (myPlayerId === 'P1') ? 'P2' : 'P1'; // 轮换
+
+                    // 通知对方这个单位移动了
+                    if (conn && conn.open) {
+                        conn.send({
+                            type: 'move',
+                            unitType: unit.type,
+                            row: nr,
+                            col: nc,
+                            owner: myPlayerId,
+                            nextTurn: currentTurn, // 发送下一个轮到谁
+                        });
+                    }
+
+                    if (currentTurn === myPlayerId) {
+                        showTurnBanner();
+                    }
+                });
+
+                mapContainer.addChild(tile);
+                highlightTiles.push(tile);
+            });
+        }
+
+        function getMovePattern(unit) {
+            if (unit.type === 'infantry') {
+                return [
+                    { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+                ];
+            } else if (unit.type === 'commander') {
+                return [
+                    { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 },
+                ];
+            } else if (unit.type === 'cavalry') {
+                const dirs = [];
+                for (let i = -2; i <= 2; i++) {
+                    if (i !== 0) {
+                        dirs.push({ dr: 0, dc: i }, { dr: i, dc: 0 }, { dr: i, dc: i }, { dr: -i, dc: i });
+                    }
+                }
+                return dirs;
+            } else if (unit.type === 'archer') {
+                return [
+                    { dr: -1, dc: -1 }, { dr: 1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: 1 },
+                ];
+            }
+            return [];
+        }
+
+        let highlightTiles = [];
+        let selectedUnit = null; // 当前被选中的棋子（用于再次点击取消高亮）
+
+        function clearHighlights() {
+            highlightTiles.forEach(t => mapContainer.removeChild(t));
+            highlightTiles = [];
+        }
+
+        function centerMap() {
+            mapContainer.x = (app.screen.width - tileSize * mapSize) / 2;
+            mapContainer.y = (app.screen.height - tileSize * mapSize) / 2;
+        }
+
+        function showTurnBanner() {
+            bannerContainer.alpha = 0;
+            bannerContainer.visible = true;
+
+            // 淡入
+            let fadeIn = true;
+            let alpha = 0;
+            const duration = 60; // 每帧大约 1/60 秒
+            let counter = 0;
+
+            const ticker = new PIXI.Ticker();
+            ticker.add(() => {
+                if (fadeIn) {
+                    alpha += 0.05;
+                    if (alpha >= 1) {
+                        alpha = 1;
+                        fadeIn = false;
+                    }
+                } else {
+                    counter++;
+                    if (counter > duration) {
+                        alpha -= 0.03;
+                        if (alpha <= 0) {
+                            alpha = 0;
+                            ticker.stop();
+                            bannerContainer.visible = false;
+                        }
+                    }
+                }
+                bannerContainer.alpha = alpha;
+            });
+            ticker.start();
+        }
+
+        //P2P logic
+        let myPlayerId = 'P1'; // 默认当前是主机
+        let conn = null;
+
+        const peer = new Peer();
+        peer.on('open', id => {
+            document.getElementById('peer-id').innerText = id;
+        });
+
+        peer.on('connection', c => {
+            conn = c;
+            myPlayerId = 'P1'; // 主机是P1
+            document.getElementById('conn-status').innerText = 'Connected as Host';
+            setupConnEvents();
+            showTurnBanner();
+        });
+
+        function connectToPeer() {
+            const targetId = document.getElementById('peer-connect').value;
+            conn = peer.connect(targetId);
+            myPlayerId = 'P2'; // 客户端是P2
+            document.getElementById('conn-status').innerText = 'Connecting...';
+
+            conn.on('open', () => {
+                document.getElementById('conn-status').innerText = 'Connected as Client';
+                setupConnEvents();
+            });
+        }
+
+        function setupConnEvents() {
+            conn.on('data', msg => {
+                if (msg.type === 'move') {
+                    const movedUnit = units.find(u => u.type === msg.unitType && u.owner !== myPlayerId);
+                    if (movedUnit) {
+                        // 吃掉我方某个单位（如果刚好在目标位置）
+                        const myUnit = units.find(u => u.row === msg.row && u.col === msg.col && u.owner === myPlayerId);
+                        if (myUnit) {
+                            mapContainer.removeChild(myUnit.sprite);
+                            const idx = units.indexOf(myUnit);
+                            if (idx !== -1) units.splice(idx, 1);
+                            checkGameOver();
+                        }
+
+                        movedUnit.row = msg.row;
+                        movedUnit.col = msg.col;
+                        movedUnit.sprite.x = msg.col * tileSize;
+                        movedUnit.sprite.y = msg.row * tileSize;
+
+                        //sync transparent
+                        const terrain = mapSymbols[msg.row][msg.col];
+                        if (terrain === 'F' || terrain === 'T' || terrain === 'M') {
+                            movedUnit.sprite.alpha = 0.5;
+                        } else {
+                            movedUnit.sprite.alpha = 1;
+                        }
+
+                    }
+                    if (msg.nextTurn) {
+                        currentTurn = msg.nextTurn;
+                        showTurnBanner();
+                    }
+                } else if (msg.type === 'gameOver') {
+                    if (msg.winner === myPlayerId) {
+                        showResultBanner('YOU WIN!');
+                    } else {
+                        showResultBanner('YOU LOSE!');
+                    }
+                    currentTurn = 'GameOver';
+                    clearHighlights();
+                }
+            });
+        }
+
+        function checkGameOver() {
+            const commanderP1 = units.find(u => u.type === 'commander' && u.owner === 'P1');
+            const commanderP2 = units.find(u => u.type === 'commander' && u.owner === 'P2');
+
+            if (!commanderP1 || !commanderP2) {
+                const winner = commanderP1 ? 'P1' : 'P2';
+                const loser = commanderP1 ? 'P2' : 'P1';
+
+                if (myPlayerId === winner) {
+                    showResultBanner('YOU WIN!');
+                } else {
+                    showResultBanner('YOU LOSE!');
+                }
+
+                if (conn && conn.open) {
+                    conn.send({ type: 'gameOver', winner });
+                }
+
+                // 防止继续操作
+                currentTurn = 'GameOver';
+                clearHighlights();
+            }
+        }
+
+        function showResultBanner(text) {
+            bannerText.text = text;
+            bannerContainer.alpha = 0;
+            bannerContainer.visible = true;
+
+            let fadeIn = true;
+            let alpha = 0;
+            const duration = 60;
+            let counter = 0;
+
+            const ticker = new PIXI.Ticker();
+            ticker.add(() => {
+                if (fadeIn) {
+                    alpha += 0.05;
+                    if (alpha >= 1) {
+                        alpha = 1;
+                        fadeIn = false;
+                    }
+                } else {
+                    counter++;
+                }
+                bannerContainer.alpha = alpha;
+            });
+            ticker.start();
+        }
+
+        window.addEventListener('resize', () => {
+            app.renderer.resize(window.innerWidth, window.innerHeight);
+            mapContainer.x = (app.screen.width - tileSize * mapSize) / 2;
+            mapContainer.y = (app.screen.height - tileSize * mapSize) / 2;
+        });
+    </script>
+
+</body>
+
+</html>
